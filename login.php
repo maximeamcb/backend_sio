@@ -1,66 +1,177 @@
 <?php
+
+/* ------------------------
+   SECURE SESSION SETTINGS
+------------------------ */
+
+session_set_cookie_params([
+    'lifetime' => 0,
+    'path' => '/',
+    'domain' => '',
+    'secure' => false, // mettre true si HTTPS
+    'httponly' => true,
+    'samesite' => 'Strict'
+]);
+
 session_start();
-require_once __DIR__ . '/dotenv.php';
+
+require_once __DIR__ . '/../dotenv.php';
+
+
+/* ------------------------
+   SECURITY HEADERS
+------------------------ */
+
+header('Content-Type: application/json');
+
+header("Access-Control-Allow-Origin: http://localhost:5173");
+header("Access-Control-Allow-Methods: POST");
+header("Access-Control-Allow-Headers: Content-Type");
+
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header("Referrer-Policy: no-referrer");
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
+
+
+/* ------------------------
+   METHOD CHECK
+------------------------ */
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+
+    http_response_code(405);
+    echo json_encode(['error' => 'Méthode non autorisée']);
+    exit();
+
+}
+
+
+/* ------------------------
+   READ INPUT
+------------------------ */
+
+$input = json_decode(file_get_contents('php://input'), true);
+
+$username = trim($input['username'] ?? '');
+$password = trim($input['password'] ?? '');
+
+if ($username === '' || $password === '') {
+
+    http_response_code(400);
+    echo json_encode(['error' => 'Username et password requis']);
+    exit();
+
+}
+
+
+/* ------------------------
+   BASIC RATE LIMIT
+------------------------ */
+
+if (!isset($_SESSION['login_attempts'])) {
+    $_SESSION['login_attempts'] = 0;
+}
+
+if ($_SESSION['login_attempts'] > 5) {
+
+    http_response_code(429);
+    echo json_encode(['error' => 'Trop de tentatives, réessayez plus tard']);
+    exit();
+
+}
+
+
+/* ------------------------
+   DATABASE CONFIG
+------------------------ */
 
 $host = $_ENV['DB_HOST'] ?? 'localhost';
 $user = $_ENV['DB_USER'] ?? 'root';
 $pass = $_ENV['DB_PASS'] ?? '';
 $dbName = $_ENV['DB_NAME'] ?? 'backend';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = $_POST['username'];
-    $password = $_POST['password'];
+$conn = new mysqli($host, $user, $pass, $dbName);
 
-    $conn = new mysqli($host, $user, $pass, $dbName);
+if ($conn->connect_error) {
 
-    if ($conn->connect_error) {
-        die("Connection failed: " . $conn->connect_error);
-    }
+    http_response_code(500);
+    echo json_encode(['error' => 'Erreur serveur']);
+    exit();
 
-    $query = "SELECT * FROM users WHERE username = '$username' AND password = '$password'";
-
-    $result = $conn->query($query);
-
-    if ($result && $result->num_rows > 0) {
-        $row = $result->fetch_assoc();
-        $_SESSION['user'] = $row['username'];
-        $_SESSION['user_id'] = $row['id'];
-        $_SESSION['role'] = $row['role'];
-        header('Location: index.php');
-        exit();
-    } else {
-        $error = "Nom d'utilisateur ou mot de passe invalide !";
-    }
-    
-    $conn->close();
 }
-?>
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>S3cure Login (MySQL)</title>
-    <style>
-        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f8ff; }
-        .login-container { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 300px; border-top: 5px solid #007bff; }
-        h1 { text-align: center; color: #333; }
-        input { width: 100%; padding: 0.5rem; margin: 0.5rem 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-        button { width: 100%; padding: 0.5rem; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        .error { color: red; text-align: center; }
-    </style>
-</head>
-<body>
-    <div class="login-container">
-        <h1>Connexion</h1>
-        <?php if (isset($error)) echo "<p class='error'>$error</p>"; ?>
-        <form method="POST">
-            <input type="text" name="username" placeholder="Nom d'utilisateur" required>
-            <input type="text" name="password" placeholder="Mot de passe" required>
-            <button type="submit">Se connecter</button>
-        </form>
-        <a href="register.php" style="text-align: center; margin-top: 1rem; display: block; color: #007bff; text-decoration: none;">Pas encore de compte ? S'inscrire ici</a>
-    </div>
-</body>
-</html>
+$conn->set_charset('utf8mb4');
+
+
+/* ------------------------
+   USER LOOKUP
+------------------------ */
+
+$stmt = $conn->prepare("SELECT id, username, password, role FROM users WHERE username = ?");
+
+$stmt->bind_param("s", $username);
+
+$stmt->execute();
+
+$result = $stmt->get_result();
+
+
+/* ------------------------
+   LOGIN LOGIC
+------------------------ */
+
+if ($result && $result->num_rows === 1) {
+
+    $row = $result->fetch_assoc();
+
+    if (password_verify($password, $row['password'])) {
+
+        session_regenerate_id(true);
+
+        $_SESSION['user_id'] = $row['id'];
+        $_SESSION['username'] = $row['username'];
+        $_SESSION['role'] = $row['role'];
+
+        $_SESSION['login_attempts'] = 0;
+
+        echo json_encode([
+            'success' => true,
+            'user' => [
+                'id' => $row['id'],
+                'username' => $row['username'],
+                'role' => $row['role']
+            ]
+        ]);
+
+    } else {
+
+        $_SESSION['login_attempts']++;
+
+        http_response_code(401);
+        echo json_encode(['error' => 'Identifiants invalides']);
+
+    }
+
+} else {
+
+    $_SESSION['login_attempts']++;
+
+    http_response_code(401);
+    echo json_encode(['error' => 'Identifiants invalides']);
+
+}
+
+
+/* ------------------------
+   CLEANUP
+------------------------ */
+
+$stmt->close();
+$conn->close();
+
+?>

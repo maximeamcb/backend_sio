@@ -1,31 +1,78 @@
 <?php
-/**
- * Simple .env loader
- */
-function loadEnv($path) {
-    if (!file_exists($path)) {
-        return false;
-    }
+declare(strict_types=1);
 
-    $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    foreach ($lines as $line) {
-        if (strpos(trim($line), '#') === 0) {
-            continue;
+if (!function_exists('loadEnv')) {
+    /**
+     * Charge un fichier .env simple dans $_ENV et $_SERVER.
+     * Format attendu :
+     * KEY=value
+     * Les lignes vides et les commentaires commençant par # sont ignorés.
+     */
+    function loadEnv(string $path): bool
+    {
+        if (!is_file($path) || !is_readable($path)) {
+            return false;
         }
 
-        list($name, $value) = explode('=', $line, 2);
-        $name = trim($name);
-        $value = trim($value);
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines === false) {
+            return false;
+        }
 
-        if (!array_key_exists($name, $_SERVER) && !array_key_exists($name, $_ENV)) {
-            putenv(sprintf('%s=%s', $name, $value));
+        foreach ($lines as $line) {
+            $line = trim($line);
+
+            if ($line === '' || str_starts_with($line, '#')) {
+                continue;
+            }
+
+            if (!str_contains($line, '=')) {
+                continue;
+            }
+
+            [$name, $value] = explode('=', $line, 2);
+
+            $name = trim($name);
+            $value = trim($value);
+
+            if ($name === '') {
+                continue;
+            }
+
+            /*
+            | Enlève les guillemets simples ou doubles autour des valeurs
+            */
+            if (
+                strlen($value) >= 2 &&
+                (
+                    ($value[0] === '"' && $value[strlen($value) - 1] === '"') ||
+                    ($value[0] === "'" && $value[strlen($value) - 1] === "'")
+                )
+            ) {
+                $value = substr($value, 1, -1);
+            }
+
+            /*
+            | On ne remplace pas une variable déjà définie
+            */
+            if (array_key_exists($name, $_ENV) || array_key_exists($name, $_SERVER)) {
+                continue;
+            }
+
             $_ENV[$name] = $value;
             $_SERVER[$name] = $value;
+
+            /*
+            | putenv reste optionnel, mais pratique pour compatibilité
+            */
+            putenv($name . '=' . $value);
         }
+
+        return true;
     }
-    return true;
 }
 
-// Automatically load from same directory if called
-loadEnv(__DIR__ . '/.env');
-?>
+if (!defined('ENV_LOADED')) {
+    define('ENV_LOADED', true);
+    loadEnv(__DIR__ . '/.env');
+}
